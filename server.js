@@ -5,6 +5,8 @@ import nodemailer from "nodemailer"; // sends emails
 import validator from "validator"; // validates emails
 import rateLimit from "express-rate-limit";
 import { logEvent } from "./utils/logger.js";
+import { pool } from "./db/postgres.js";
+
 
 dotenv.config();
 
