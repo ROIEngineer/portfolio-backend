@@ -1,11 +1,11 @@
 import express from "express"; // server framework
 import cors from "cors"; // allows frontend to talk to backend
 import dotenv from "dotenv"; // keeps environment variables credentials secure
-import nodemailer from "nodemailer"; // sends emails
 import validator from "validator"; // validates emails
 import rateLimit from "express-rate-limit";
 import { logEvent } from "./utils/logger.js";
 import { pool } from "./db/postgres.js";
+import { Resend } from "resend";
 
 dotenv.config();
 
@@ -13,10 +13,13 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// Initialize Resend
+const resend = new Resend(process.env.RESEND_API_KEY);
+
 // Rate limiter
 const contactLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // max 5 requests per IP
+  max: 5,                   // max 5 requests per IP
   handler: (req, res) => {
     logEvent("RATE_LIMITED", {
       ip: req.ip,
@@ -28,20 +31,11 @@ const contactLimiter = rateLimit({
   },
 });
 
-// Sends mail
-const transporter = nodemailer.createTransport({
-  service: "gmail",
-  auth: {
-    user: process.env.EMAIL_USER,
-    pass: process.env.EMAIL_PASS,
-  },
-});
-
-// POST CONTACT
-app.post("/api/contact", async (req, res) => {
-  // Setup contact endpoint
+// POST CONTACT ROUTE
+app.post("/api/contact", contactLimiter, async (req, res) => {
   const {firstName, lastName, email, subject, message, company } = req.body;
 
+  // log spam (honeypot trigger)
   if (company) {
     logEvent("SPAM_BLOCKED", {
       ip: req.ip,
@@ -81,16 +75,21 @@ app.post("/api/contact", async (req, res) => {
   const sanitizedSubject = validator.escape(subject);
 
   try {
-    console.log(`Attempting to send email from: ${email}`);
-    console.log(`Using Gmail SMTP: ${process.env.EMAIL_USER}`);
-
-    const mailInfo = await transporter.sendMail({
-      from: `"${sanitizedFirstName} ${sanitizedLastName}" <${email}>`,
-      to: process.env.EMAIL_USER,
-      subject: subject || "New Portfolio Contact",
-      text: `Name: ${sanitizedFirstName} ${sanitizedLastName} Email: ${email} Subject: ${sanitizedSubject} Message: ${sanitizedMessage}`,});
-
-    console.log(`Email sent successfully: ${mailInfo.messageId}`);
+    const { data, error } = await resend.emails.send({
+      from: 'Portfolio Contact <onboarding@resend.dev>',
+      to: [process.env.EMAIL_USER],
+      reply_to: email,
+      subject: sanitizedSubject || "New Portfolio Contact",
+      text: `Name: ${sanitizedFirstName} ${sanitizedLastName}\nEmail: ${email}\nSubject: ${sanitizedSubject}\nMessage: ${sanitizedMessage}`,
+      html: `
+        <h3>New Contact Form Submission</h3>
+        <p><strong>Name:</strong> ${sanitizedFirstName} ${sanitizedLastName}</p>
+        <p><strong>Email:</strong> ${email}</p>
+        <p><strong>Subject:</strong> ${sanitizedSubject || 'None'}</p>
+        <p><strong>Message:</strong></p>
+        <p>${sanitizedMessage}</p>
+      `
+    });
 
     await pool.query(
       `
@@ -116,29 +115,18 @@ app.post("/api/contact", async (req, res) => {
 
     res.status(200).json({ success: true });
   } catch (error) {
-    console.error("SMTP Error details:", {
-      error: error.message,
-      code: error.code,
-      command: error.command || 'N/A'
-    });
-
-    // Check for specific Gmail/SMTP errors
-    if (error.code === 'ECONNREFUSED') {
-      console.error("Connection refused - likely port blocked by Render");
-    }
+    console.error("Server error:", error);
 
     logEvent("ERROR", {
       ip: req.ip,
       error: error.message,
-      details: error.code
     });
 
-    res.status(500).json({ error: "Failed to send email" });
+    res.status(500).json({ error: "Failed to send message. Please try again later." });
   }
 });
 
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
 
 // Handle Pool Shutdown - Resource-awareness
