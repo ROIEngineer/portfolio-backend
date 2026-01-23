@@ -19,7 +19,7 @@ const resend = new Resend(process.env.RESEND_API_KEY);
 // Rate limiter
 const contactLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 5, // max 5 requests per IP
+  max: 5,                   // max 5 requests per IP
   handler: (req, res) => {
     logEvent("RATE_LIMITED", {
       ip: req.ip,
@@ -31,11 +31,11 @@ const contactLimiter = rateLimit({
   },
 });
 
-// POST CONTACT
-app.post("/api/contact", async (req, res) => {
-  // Setup contact endpoint
+// POST CONTACT ROUTE
+app.post("/api/contact", contactLimiter, async (req, res) => {
   const {firstName, lastName, email, subject, message, company } = req.body;
 
+  // log spam (honeypot trigger)
   if (company) {
     logEvent("SPAM_BLOCKED", {
       ip: req.ip,
@@ -75,11 +75,10 @@ app.post("/api/contact", async (req, res) => {
   const sanitizedSubject = validator.escape(subject);
 
   try {
-    // Send email using Resend
     const { data, error } = await resend.emails.send({
-      from: 'Portfolio Contact <onboarding@resend.dev>', // Use your verified domain
-      to: [process.env.EMAIL_USER], // Your receiving email
-      reply_to: email, // User's email for replies
+      from: 'Portfolio Contact <onboarding@resend.dev>',
+      to: [process.env.EMAIL_USER],
+      reply_to: email,
       subject: sanitizedSubject || "New Portfolio Contact",
       text: `Name: ${sanitizedFirstName} ${sanitizedLastName}\nEmail: ${email}\nSubject: ${sanitizedSubject}\nMessage: ${sanitizedMessage}`,
       html: `
@@ -92,14 +91,6 @@ app.post("/api/contact", async (req, res) => {
       `
     });
 
-    if (error) {
-      console.error('Resend error:', error);
-      throw new Error(error.message);
-    }
-
-    console.log('Resend email sent:', data?.id);
-
-    // Save to database (keep your existing code)
     await pool.query(
       `
       INSERT INTO messages
@@ -120,25 +111,28 @@ app.post("/api/contact", async (req, res) => {
       ip: req.ip,
       email,
       subject,
-      resendId: data?.id
     });
 
     res.status(200).json({ success: true });
   } catch (error) {
     console.error("Server error:", error);
-    
+
     logEvent("ERROR", {
       ip: req.ip,
       error: error.message,
-      provider: "resend"
     });
 
-    res.status(500).json({ 
-      error: "Failed to send message. Please try again later." 
-    });
+    res.status(500).json({ error: "Failed to send message. Please try again later." });
   }
 });
 
 const PORT = process.env.PORT || 5000;
-
 app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+process.on("SIGINT", async () => {
+  await pool.end();
+  process.exit(0);
+});
+
+
+
